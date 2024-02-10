@@ -1,0 +1,781 @@
+---
+title: "Predictive Models of Adult Income in the US Using Census Data from 1994"
+author: "Bardh Kukaj"
+date: "10/02/2024"
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+header-includes:
+  - \usepackage{titling}
+  - \pretitle{\begin{center}\LARGE\bfseries}
+  - \posttitle{\par\end{center}\vskip 0.5em}
+  - \preauthor{\begin{center}\large\ttfamily}
+  - \postauthor{\par\end{center}}
+  - \predate{\begin{center}\large}
+  - \postdate{\par\end{center}\vspace{\baselineskip}}
+  - \let\oldmaketitle\maketitle
+  - \let\oldtableofcontents\tableofcontents
+  - \renewcommand{\maketitle}{\oldmaketitle\clearpage}
+  - \renewcommand{\tableofcontents}{\oldtableofcontents\clearpage}
+---
+
+
+\newpage
+
+``` {r setup, include = FALSE}
+
+#Bardh Kukaj's Predictive Models on Adult Income Census (from Kaggle)/Capstone Course - CYO project
+
+
+##########################################################
+#                   Adult Income Census                  #
+##########################################################
+
+# Installing/Setting libraries in case they are not already installed - the code below that is provided by the course to import and set the data
+if (!require(tidyverse)) install.packages("tidyverse")
+if (!require(caret)) install.packages("caret")
+if (!require(ggthemes)) install.packages("ggthemes")
+if (!require(knitr)) install.packages("knitr")
+if (!require(rpart)) install.packages("rpart")
+if (!require(randomForest)) install.packages("randomForest")
+if (!require(rpart.plot)) install.packages("rpart.plot")
+if (!require(gridExtra)) install.packages("gridExtra")
+if (!require(doParallel)) install.packages("doParallel") # to speed up computation time for the last model
+
+library(tidyverse)
+library(caret)
+library(ggthemes)
+library(knitr)
+library(rpart)
+library(randomForest)
+library(rpart.plot)
+library(gridExtra)
+library(doParallel)
+
+
+# Data set stored in my GitHub repository: https://github.com/bardhkukaj91/CYO_adult_census_income/raw/main/adult.xlsx
+# downloading the data
+
+githubfile <- "https://github.com/bardhkukaj91/CYO_adult_census_income/raw/main/adult.csv"
+
+aic_data <- read.csv(url(githubfile))
+
+# exploring the data - how many NAs?
+
+head(aic_data)
+na_summary <- sapply(aic_data, {function(x) any(is.na(x))})
+
+kable(na_summary, caption = "Checking for missing data")
+
+# I see some ? characters in some rows. Creating a function that replaces them with NA in all columns and then removing the NAs as well
+
+clean_data <- function(aic_data) {
+  aic_data <- lapply(aic_data, function(x) {
+    if (is.character(x)) {
+    x[x == "?"] <- NA
+    }
+    return(x)
+  })
+    aic_data <- as.data.frame(aic_data)
+  
+  
+  # Remove rows with NA values
+  aic_data <- na.omit(aic_data)
+  return(aic_data)
+}
+
+# Applying the function to the dataset
+aic_data_clean <- clean_data(aic_data)
+
+# checking the data, we see fewer observations now: 30,162; previously there were 32,561
+head(aic_data_clean)
+
+# checking the types of data
+str(aic_data_clean)
+
+# since I will be running a logistic regression, I need to specify that several variables/columns are factors
+categorical_variables <- c("workclass", "sex", "race", "marital.status", "occupation", "native.country", "education", "relationship", "income")
+aic_data_clean[categorical_variables] <- lapply(aic_data_clean[categorical_variables], factor)
+
+# checking if the encoding was done correctly
+str(aic_data_clean)
+
+# double-checking if the levels (categories) are in the right order, with "<=50k" being the first one, as that is how I'd prefer it to be
+levels(aic_data_clean$income)
+
+summary(aic_data_clean)
+
+# Creating the train and test sets
+set.seed(2008)
+test_index <- createDataPartition(y = aic_data_clean$income, times = 1, p = 0.2, list = FALSE)
+test_set <- aic_data_clean[test_index, ]
+train_set <- aic_data_clean[-test_index, ]
+
+# training the baseline model
+
+train_base_aic <- train(income ~ workclass + education + occupation + capital.gain + capital.loss + hours.per.week, method = "glm", data = train_set)
+
+# saving the predicted values in y_hat_aic
+y_hat_base_aic <- predict(train_base_aic, newdata = test_set, type = "raw")
+
+# checking the accuracy and F1 score
+baseOA <- confusionMatrix(y_hat_base_aic, test_set$income)$overall[["Accuracy"]]
+
+baseF1 <- F_meas(data = y_hat_base_aic, reference = test_set$income)
+
+baselinemodel <- train_base_aic$finalModel
+
+summary(baselinemodel)
+
+Results_Summary <- tibble(method="Baseline Logistic Regression", Overall_Accuracy = baseOA, F1_Score = baseF1)
+
+# training the full logistic regression model
+train_aic <- train(income ~ . , method = "glm", data = train_set)
+                   
+# saving the predicted values in y_hat_aic
+y_hat_aic <- predict(train_aic, newdata = test_set, type = "raw")
+
+# checking the accuracy and F1 score
+logOA <- confusionMatrix(y_hat_aic, test_set$income)$overall[["Accuracy"]]
+
+logF1 <- F_meas(data = y_hat_aic, reference = test_set$income)
+
+# checking the coefficients and their statistical significance
+full_log_model <- train_aic$finalModel
+
+summary(full_log_model)
+
+Results_Summary <- bind_rows(Results_Summary, tibble(method="Logistic Regression + biases", Overall_Accuracy = logOA, F1_Score = logF1))
+
+# Likelihood ratio test
+# as I am primarily working with the train function of the caret package, I will switch to the glm function
+# to obtain the predict values and run the LTR test in a simpler code, as I couldn't do it with the predict values
+# from the train function (caret package)
+
+# Fitting the baseline model
+baseline_model <- glm(income ~ age + workclass + education + occupation + capital.gain + capital.loss + hours.per.week, 
+                  data = train_set, family = binomial())
+
+# Fit the full model (assuming you want all other variables included)
+full_model <- glm(income ~ ., data = train_set, family = binomial())
+
+lrt_result<- anova(baseline_model, full_model, test = "Chisq")
+
+lrt_result
+
+# Decision tree - default - training and predicting the values first
+dtdef_model <- train(income ~ ., data = train_set, method = "rpart")
+
+predictions_dtdef_model <- predict(dtdef_model, newdata = test_set, type = "raw")
+
+# calculating OA and F1, and saving the results
+
+classOA <- confusionMatrix(predictions_dtdef_model, test_set$income)$overall[["Accuracy"]]
+
+classF1 <- F_meas(data = predictions_dtdef_model, reference = test_set$income)
+
+Results_Summary <- bind_rows(Results_Summary, tibble(method="Decision tree - Default Settings", Overall_Accuracy = classOA, F1_Score = classF1))
+
+# plotting the decision tree
+
+rpart.plot(dtdef_model$finalModel)
+
+# Controlled decision tree - cross validation + tuning of complexity parameters; training the model first
+
+dt_control <- trainControl(method = "cv", number = 10)
+grid <- expand.grid(.cp = seq(0.01, 0.1, by = 0.01))
+
+dt_model <- train(income ~ ., data = train_set, method = "rpart", trControl = dt_control, tuneGrid = grid)
+
+# Predict the model and run the OA and F1 tests
+predictions_dt_model <- predict(dt_model, newdata = test_set)
+
+dtOA <- confusionMatrix(predictions_dt_model, test_set$income)$overall[["Accuracy"]]
+dtF1 <- F_meas(data = predictions_dt_model, reference = test_set$income)
+
+# Save the reults
+Results_Summary <- bind_rows(Results_Summary, tibble(method="Controlled Decision Tree", Overall_Accuracy = dtOA, F1_Score = dtF1))
+
+# Random forest - default settings
+
+# Train the model
+rfmodel_default <- randomForest(income ~ ., data = train_set)
+
+# Predict the model and run the OA and F1 results
+predictions_rfmodel_def <- predict(rfmodel_default, newdata = test_set)
+
+rfmodel_defOA <- confusionMatrix(predictions_rfmodel_def, test_set$income)$overall[["Accuracy"]]
+
+rfmodel_defF1 <- F_meas(data = predictions_rfmodel_def, reference = test_set$income)
+
+# Save the results
+Results_Summary <- bind_rows(Results_Summary, tibble(method="Random Forest - Default Settings", Overall_Accuracy = rfmodel_defOA, F1_Score = rfmodel_defF1))
+
+# Random forest - Tuned Model
+
+# Defining the range of mtry
+grid <- data.frame(mtry =  c(1, 3, 5, 7))
+
+# for faster computation
+registerDoParallel(cores = detectCores()) # activating parallel processing to speed up computation time
+
+# Train control with cross-validation
+train_control <- trainControl(method = "cv", number = 10, allowParallel = TRUE)
+
+# Train the Tuned Random Forest model
+rfmodel_tuned <- train(income ~ ., data = train_set, method = "rf", tuneGrid = grid, trControl = train_control, ntree = 100)
+
+# Predict the model
+predictions_rfmodel_tuned <- predict(rfmodel_tuned, newdata = test_set)
+
+# stop faster computation
+
+stopImplicitCluster() # deactivating parallel processing
+
+
+rfmodel_tunedOA <- confusionMatrix(predictions_rfmodel_tuned, test_set$income)$overall[["Accuracy"]]
+
+rfmodel_tunedF1 <- F_meas(data = predictions_rfmodel_tuned, reference = test_set$income)
+
+# Save the results
+Results_Summary <- bind_rows(Results_Summary, tibble(method="Random Forest - Tuned", 
+                                                     Overall_Accuracy = rfmodel_tunedOA, F1_Score = rfmodel_tunedF1))
+
+```
+
+# Introduction
+
+This report is written for the course “HarvardX PH125.9x - Data Science: Capstone,” which is part of the HarvardX Professional Certificate in Data Science Program. 
+
+This report utilizes data from the U.S. Adult Income Census of 1994 to create a model that predicts whether an adult earns over or under 50k USD annually, based on 14 independent variables. The data, obtained from Kaggle and stored in the author’s GitHub repository for this project (accessible in the R script or RMD file), is publicly shareable under the “CC0: Public Domain” license on Kaggle. 
+
+The objective of this report is to develop a model that achieves the highest possible prediction accuracy by utilizing various models, techniques, and algorithms. 
+
+To meet this objective, six different models were developed, including two linear models (using logistic regression) and four non-linear models (two decision trees and two random forest algorithms). 
+
+The random forest model, using default settings, yielded the most optimal results. The models were compared using two metrics: Overall Accuracy and F1 Score. Overall Accuracy measures the model’s effectiveness across all classes, while the F1 Score balances precision and recall, leading to a model that optimally predicts all classes by accounting for differences between them. The default random forest model achieved an overall accuracy of 0.87 and an F1 score of 0.91. 
+
+The report is structured as follows. The next section, “Analysis and Methodology,” details the rationale behind selecting each model and technique. It begins with a discussion of all variables, followed by their visualization in relation to the dependent variable, income. The subsequent section focuses on the results, including explanations of the models used and the Overall Accuracy and F1 results. It is worth noting that the models created using logistic regression underwent a Likelihood Ratio Test, which revealed a highly significant p-value, rejecting the null hypothesis that the baseline model fits the data better than the full model. This section also briefly discusses the estimates of the reduced and full logistic regression models, which are attached as annexes at the end of this report. The concluding section, “Concluding Remarks,” summarizes the findings, discusses the report’s limitations, and offers recommendations for future work. 
+
+It should be noted that three files in total are submitted as part of this project: the R script, the RMD file, and the PDF file generated by the RMD file. To keep the PDF file succinct and avoid overwhelming the reader with details, most of the code found in the first two files has not been included in the PDF.
+
+\newpage
+
+## Exploring and cleaning data
+
+After downloading and installing the necessary packages for this project, the data is retrieved from the GitHub repository link provided in the R script and the RMD file. The data is then cleaned by removing instances of “NAs” and “?” that are present in the dataset. Initially, there are 32,561 observations; after cleaning, 30,162 remain.
+
+There are a total of 15 variables, which are listed and briefly explained below.
+
+* age
+* work class - type of work the respondents are engaged, e.g. private, federal, etc.
+* fnlwgt - or final weight is an estimate of the number of people in the US each observation (or respondent)
+represents.
+* education - level of education.
+* education. num - years of education.
+* marital.status - categories include: “Divorced”, “Married-AF-spouse”, “Married-civ-spouse”, “Marriedspouse-
+absent”, and “Never-married”, “Separated”, and “Widowed”.
+* occupation - type of occupation.
+* relationship - categories include: “Husband”, “Not-in-family”, “Other-relative”, “Own-child”, “Unmarried”,
+and “Wife”.
+* race - categories include: “Amer-Indian-Eskimo”, “Asian-Pac-Islander”, “Black”, “Other”, and
+“White”.
+* sex - male and female.
+* capital. gain - whether the respondent has capital gains.
+* capital.loss - whether the respondent has capital loss.
+* native.country - includes 41 countries.
+* income - categories include: over 50k USD, or under 50k USD (annually).
+
+The dataset contains two types of variables: nominal categorical variables and discrete numerical variables. Before partitioning the dataset into training and test sets, with a ratio of 8:2, certain variables are designated as categorical (or factors, in R programming language terminology). These variables include “workclass”, “sex”, “race”, “marital.status”, “occupation”, “native.country”, “education”, “relationship”, and “income”. The remaining variables are specified as integers. Given that the dependent variable, income, is also categorical, the selection of tools and algorithms is made accordingly. The chosen methods include logistic regression, decision trees, and random forest algorithms.
+
+Lastly, since the dataset is used solely for the purpose of identifying a model that optimally fits the data,
+rather than for making inferences about the total population, I will not adjust the numerical variables to
+reflect exact population numbers. However, I will include it as an independent variable in all models, except
+for the first baseline model.
+
+## Visualising the relationship between independent variables with the dependent variable
+
+The initial set of variables selected for visualization are those that, intuitively, have a strong economic rationale for influencing income levels. These variables include “occupation,” “education,” “workclass,” “capital.gain,” “capital.loss,” and “hours.per.week.” It’s important to note that including “education.num” alongside “education” can lead to multicollinearity, as both variables essentially convey the same information but in different forms. Since “education” provides a more statistically significant estimate than “education.num,” only the former is included in the analysis to avoid redundancy and potential distortion in the model’s results.
+
+The analysis also calculates the average income level across all respondents, revealing that approximately 25
+percent of them earn more than 50K USD annually. This insight is represented visually as a red line in all
+the following graphs, providing a clear benchmark against which to compare the income distribution across
+different categories and variables.
+
+```{r occupation, echo=FALSE, message=FALSE}
+
+# adding the percentage of adults earning on average less than 50k annually - i'll be using that on each graph
+mean_hline <- mean(aic_data_clean$income== ">50K")*100
+
+## occupation - the percent of each occupation in terms of over or under 50k income
+### firstly summarizing the data so that I can visualize them easily with ggplot
+occ_percentage <- aic_data_clean %>%
+  group_by(occupation, income) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100) %>%
+  ungroup()
+
+### visualizing through a stacked bar for each occupation
+ggplot(occ_percentage, aes(x = occupation, y = Percentage, fill = income)) + 
+  geom_bar(stat = "identity", position = "stack") +     # specifying the x and y axes + specifying the stacked bar
+  labs(y = "Percentage", x = "Occupation", fill = "Income",
+       caption = "Note: Red line represents the % of adult population earning more than 50K USD annually") +
+  theme_clean() +                                       # using the "clean" theme from ggthemes package 
+  scale_fill_brewer(palette = "Pastel1") +              # 1st selection of the pastel colors
+  ggtitle("Income Levels by Occupation") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + # Rotates x-axis labels to 90 degrees
+  geom_hline(yintercept = mean_hline, linetype = "solid", color = "red")+
+  theme(plot.caption = element_text(size = 8, color = "red"))
+
+
+```
+
+The graph above shows that occupations such as “Sales” and “Craft Repair” have average incomes around the 25 percent mark, indicating that approximately a quarter of individuals in these occupations earn more than 50K USD annually. On the other hand, “Executives” and professionals with “Specialties” significantly outperform the average, with about 50 percent of individuals in these categories surpassing the 50K USD annual income threshold. Conversely, occupations such as “Handlers/Cleaners” and those involved in “Private House Services” are at the lower end of the income spectrum, earning the least.
+
+```{r educationyears, echo=FALSE, message=FALSE}
+
+## education years - the percent of each year of education status in terms of over or under 50k income
+### firstly summarizing the data so that I can visualize them easily with ggplot
+ed_percentage <- aic_data_clean %>%
+  group_by(education.num, income) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100) %>%
+  ungroup()
+
+### visualizing through a stacked bar per each year of education
+ggplot(ed_percentage, aes(x = education.num, y = Percentage, fill = income)) + 
+  geom_bar(stat = "identity", position = "stack") +     # specifying the x and y axes + specifying the stacked bar
+  labs(y = "Percentage", x = "Education Years", fill = "Income",
+       caption = "Note: Red line represents the % of adult population earning more than 50K USD annually") +
+  theme_clean() +                                       # using the "clean" theme from ggthemes package 
+  scale_fill_brewer(palette = "Pastel1") +              # 1st selection of the pastel colors
+  ggtitle("Income Levels by Education Years") +
+  geom_hline(yintercept = mean_hline, linetype = "solid", color = "red")+
+  theme(plot.caption = element_text(size = 8, color = "red"))
+
+```
+
+The impact of education on income appears relatively stable up to nine years of education, indicating minimal variation in income levels within this range. Beyond nine years of education there is a noticeable increase in income. This upward trend continues until one reaches 15 years of education, after which the income levels off, showing similar income yields for individuals with 15 and 16 years of education.
+
+```{r workclass, echo=FALSE, message=FALSE}
+## workclass - the percent of each workclass in terms of over or under 50k income
+### firstly summarizing the data so that I can visualize them easily with ggplot
+workc_percentage <- aic_data_clean %>%
+  group_by(workclass, income) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100) %>%
+  ungroup()
+
+### visualizing through a stacked bar per each work class
+ggplot(workc_percentage, aes(x = workclass, y = Percentage, fill = income)) + 
+  geom_bar(stat = "identity", position = "stack") +     # specifying the x and y axes + specifying the stacked bar
+  labs(y = "Percentage", x = "Work Class", fill = "Income", 
+       caption = "Note: Red line represents the % of adult population earning more than 50K USD annually") +
+  theme_clean() +                                       # using the "clean" theme from ggthemes package 
+  scale_fill_brewer(palette = "Pastel1") +              # 1st selection of the pastel colors
+  ggtitle("Income Levels by Work Class") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + # x-axis labels rotated to 90 degrees
+  geom_hline(yintercept = mean_hline, linetype = "solid", color = "red")+
+  theme(plot.caption = element_text(size = 8, color = "red"))
+
+
+```
+
+When analyzing the distribution of income across various work classes, it can be noticed that the majority
+align closely with the overall mean, which indicates that about 25 percent of the adult population earns
+more than 50K USD annually. Notably, individuals employed by the federal government and, more significantly,
+those who are self-employed, stand out compared to this trend. Approximately 35 percent of federal
+government workers and over 50 percent of self-employed individuals report earning more than 50K USD
+annually.
+
+```{r capitalgainslosses, echo=FALSE, message=FALSE}
+
+## capital.gain - categorizing over or under 50k income in case one has capital gains
+### firstly categorizing the data so that I can visualize them easily with ggplot
+
+cap_cat <- aic_data_clean %>% 
+  mutate(capital_gain = ifelse(capital.gain == "0", "No Capital Gain", "Has Capital Gain"))
+
+### then summarizing the data so that I can visualize them easily with ggplot
+cap_percentage <- cap_cat %>%
+  group_by(capital_gain, income) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100) %>%
+  ungroup()
+
+### visualizing through a stacked bar - Those who have capital gains, and those who haven't
+g1 <- ggplot(cap_percentage, aes(x = capital_gain, y = Percentage, fill = income)) + 
+  geom_bar(stat = "identity", position = "stack") +     # specifying the x and y axes + specifying the stacked bar
+  labs(y = "Percentage", x = "Capital gain", fill = "Income") +
+  theme_clean() +                                       # using the "clean" theme from ggthemes package 
+  scale_fill_brewer(palette = "Pastel1") +              # 1st selection of the pastel colors
+  ggtitle("Income Levels - Capital Gains vs. None") +
+  geom_hline(yintercept = mean_hline, linetype = "solid", color = "red")+
+  theme(plot.caption = element_text(size = 8, color = "red"))
+
+## capital.loss - categorizing over or under 50k income in case one has capital losses
+### firstly categorizing the data so that I can visualize them easily with ggplot
+
+capl_cat <- aic_data_clean %>% 
+  mutate(capital_loss = ifelse(capital.loss == "0", "No Capital Loss", "Has Capital Loss"))
+
+### then summarizing the data so that I can visualize them easily with ggplot
+capl_percentage <- capl_cat %>%
+  group_by(capital_loss, income) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100) %>%
+  ungroup()
+
+### visualizing through a stacked bar - Those who have capital gains, and those who haven't
+g2 <- ggplot(capl_percentage, aes(x = capital_loss, y = Percentage, fill = income)) + 
+  geom_bar(stat = "identity", position = "stack") +     # specifying the x and y axes + specifying the stacked bar
+  labs(y = "Percentage", x = "Capital loss", fill = "Income",
+       caption = "Note: Red line represents the % of adult population earning more than 50K USD annually") +
+  theme_clean() +                                       # using the "clean" theme from ggthemes package 
+  scale_fill_brewer(palette = "Pastel1") +              # 1st selection of the pastel colors
+  ggtitle("Income Levels - Capital Losses vs. None") +
+  geom_hline(yintercept = mean_hline, linetype = "solid", color = "red")+
+  theme(plot.caption = element_text(size = 8, color = "red"))
+
+grid.arrange(g1, g2, nrow=2)
+
+
+```
+
+It is reasonable to assume that individuals reporting either capital gains or losses are generally in higher
+income brackets compared to those who do not report such financial activities. This assumption is supported
+by the graph above. Specifically, the bar plot reveals that approximately 63 percent of individuals with capital
+gains earn more than 50K USD annually, a higher percentage compared to over 50 percent of those reporting
+capital losses. This indicates a clear correlation between the presence of capital gains or losses and higher
+income levels.
+
+```{r workhours, echo=FALSE, message=FALSE}
+
+## working hours per week - the percent of each category of working type (part-, full-, full- + overt-time) 
+## in terms of over or under 50k income
+### firstly categorizing the data so that I can visualize them easily with ggplot
+
+hrs_cat <- aic_data_clean %>% 
+  mutate(work_hours_category = case_when(
+    hours.per.week < 40 ~ "Part-time",               # less than 40 hrs is categorized as part-time
+    hours.per.week == 40 ~ "Full-time",              # exactly 40 hrs is categorized as full-time
+    hours.per.week > 40 ~ "Full-time + Overtime"))   # more than 40 hrs is categorized as full-time + overtime
+
+### then summarizing the data so that I can visualize them easily with ggplot
+
+hrs_percentage <- hrs_cat %>%
+  group_by(work_hours_category, income) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100) %>%
+  ungroup()
+
+### visualizing through a stacked bar per each work type category
+ggplot(hrs_percentage, aes(x = work_hours_category, y = Percentage, fill = income)) + 
+  geom_bar(stat = "identity", position = "stack") +     # specifying the x and y axes + specifying the stacked bar
+  labs(y = "Percentage", x = "Type of Work", fill = "Income",
+       caption = "Note: Red line represents the % of adult population earning more than 50K USD annually") +
+  theme_clean() +                                       # using the "clean" theme from ggthemes package 
+  scale_fill_brewer(palette = "Pastel1") +              # 1st selection of the pastel colors
+  ggtitle("Income Levels by Type of Work") +
+  geom_hline(yintercept = mean_hline, linetype = "solid", color = "red")+
+  theme(plot.caption = element_text(size = 8, color = "red"))
+
+
+```
+
+For the purpose of visual analysis, data on work hours per week have been segmented into three categories:
+part-time (less than 40 hours per week), full-time (exactly 40 hours per week), and full-time with overtime
+(more than 40 hours per week). The visual representation reveals an interesting trend: on average, individuals
+working exactly 40 hours per week (full-time workers) earn less than the average income observed across all
+respondents.
+
+```{r race, echo=FALSE, message=FALSE}
+
+## race - the percent of each race in terms of over or under 50k income
+### firstly summarizing the data so that I can visualize them easily with ggplot
+race_percentage <- aic_data_clean %>%
+  group_by(race, income) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100) %>%
+  ungroup()
+
+### visualizing through a stacked bar per each race
+ggplot(race_percentage, aes(x = race, y = Percentage, fill = income)) +
+  geom_bar(stat = "identity", position = "stack") +     # specifying the x and y axes + specifying the stacked bar
+  labs(y = "Percentage", x = "Race", fill = "Income",
+  caption = "Note: Red line represents the % of adult population earning more than 50K USD annually") +
+  theme_clean() +                                       # using the "clean" theme from ggthemes package 
+  scale_fill_brewer(palette = "Pastel1") +              # 1st selection of the pastel colors
+  ggtitle("Income Levels by Race") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + # x-axis labels rotated to 90 degrees
+  geom_hline(yintercept = mean_hline, linetype = "solid", color = "red")+
+  theme(plot.caption = element_text(size = 8, color = "red"))
+
+
+```
+
+When analyzing income levels by race, it can be noticed that, on average, individuals identified as Amer- Indian-Eskimo have the highest earnings. As previously mentioned, the data has not been adjusted for the final weight variable, which could explain the unexpected result when attempting to generalize these findings to the total population. White respondents appear to earn slightly above the average, whereas individuals from other racial groups earn significantly below the average.
+
+```{r sex, echo=FALSE, message=FALSE}
+## sex - the percent of each sex in terms of over or under 50k income
+### firstly summarizing the data so that I can visualize them easily with ggplot
+sex_percentage <- aic_data_clean %>%
+  group_by(sex, income) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100) %>%
+  ungroup()
+
+### visualizing through a stacked bar for each sex
+ggplot(sex_percentage, aes(x = sex, y = Percentage, fill = income)) +
+  geom_bar(stat = "identity", position = "stack") +     # specifying the x and y axes + specifying the stacked bar
+  labs(y = "Percentage", x = "Sex", fill = "Income",
+  caption = "Note: Red line represents the % of adult population earning more than 50K USD annually") +
+  theme_clean() +                                       # using the "clean" theme from ggthemes package 
+  scale_fill_brewer(palette = "Pastel1") +              # 1st selection of the pastel colors
+  ggtitle("Income Levels by Sex") +
+  geom_hline(yintercept = mean_hline, linetype = "solid", color = "red")+
+  theme(plot.caption = element_text(size = 8, color = "red"))
+
+
+```
+
+The analysis of the gender pay gap, using data from 1994, confirms that men, on average, earn more than women. Specifically, men’s earnings exceed the overall average, while women’s earnings are less than half of this average. This stark disparity highlights the significant income gap between genders as observed in the dataset from that period.
+
+```{r maritalstatus, echo=FALSE, message=FALSE}
+## marital status - the percent of each marital status in terms of over or under 50k income
+### firstly summarizing the data so that I can visualize them easily with ggplot
+ms_percentage <- aic_data_clean %>%
+  group_by(marital.status, income) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100) %>%
+  ungroup()
+
+### visualizing through a stacked bar per each marital status
+ggplot(ms_percentage, aes(x = marital.status, y = Percentage, fill = income)) + 
+  geom_bar(stat = "identity", position = "stack") +     # specifying the x and y axes + specifying the stacked bar
+  labs(y = "Percentage", x = "Marital Status", fill = "Income",
+  caption = "Note: Red line represents the % of adult population earning more than 50K USD annually") +
+  theme_clean() +                                       # using the "clean" theme from ggthemes package 
+  scale_fill_brewer(palette = "Pastel1") +              # 1st selection of the pastel colors
+  ggtitle("Income Levels by Marital Status") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + # x-axis labels rotated to 90 degrees
+  geom_hline(yintercept = mean_hline, linetype = "solid", color = "red")+
+  theme(plot.caption = element_text(size = 8, color = "red"))
+```
+
+Those married with an armed forces (AF spouse) or with a civilian (civ spouse) by far earn more than the rest, with the former earning the most. Those who never married on average have the least income.
+
+```{r relationshipstatus, echo=FALSE, message=FALSE}
+
+## relationship status - the percent of each relationship status in terms of over or under 50k income
+### firstly summarizing the data so that I can visualize them easily with ggplot
+rs_percentage <- aic_data_clean %>%
+  group_by(relationship, income) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100) %>%
+  ungroup()
+
+### visualizing through a stacked bar per each relationship status
+ggplot(rs_percentage, aes(x = relationship, y = Percentage, fill = income)) + 
+  geom_bar(stat = "identity", position = "stack") +     # specifying the x and y axes + specifying the stacked bar
+  labs(y = "Percentage", x = "Relationship Status", fill = "Income",
+  caption = "Note: Red line represents the % of adult population earning more than 50K USD annually") +
+  theme_clean() +                                       # using the "clean" theme from ggthemes package 
+  scale_fill_brewer(palette = "Pastel1") +              # 1st selection of the pastel colors
+  ggtitle("Income Levels by Relationship Status") +
+  geom_hline(yintercept = mean_hline, linetype = "solid", color = "red")+
+  theme(plot.caption = element_text(size = 8, color = "red"))
+
+
+
+```
+
+The results of those being married (with a present spouse) are replicated also in the following graph, where those that identify either as a husband or a wife generally earn more than the rest.
+
+```{r nativecountry, echo=FALSE, message=FALSE}
+
+## native country - the percent of each native country in terms of over or under 50k income
+### firstly categorizing the data so that I can visualize them easily with ggplot
+
+nat_cat <- aic_data_clean %>% 
+  mutate(native_country = ifelse(native.country == "United-States", "United-States", "Non-US"))
+
+### then summarizing the data so that I can visualize them easily with ggplot
+natc_percentage <- nat_cat %>%
+  group_by(native_country, income) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100) %>%
+  ungroup()
+
+### visualizing through a stacked bar - US and Non-US
+ggplot(natc_percentage, aes(x = native_country, y = Percentage, fill = income)) + 
+  geom_bar(stat = "identity", position = "stack") +     # specifying the x and y axes + specifying the stacked bar
+  labs(y = "Percentage", x = "Native Country", fill = "Income",
+  caption = "Note: Red line represents the % of adult population earning more than 50K USD annually") +
+  theme_clean() +                                       # using the "clean" theme from ggthemes package 
+  scale_fill_brewer(palette = "Pastel1") +              # 1st selection of the pastel colors
+  ggtitle("Income Levels by Country of Origin") +
+  geom_hline(yintercept = mean_hline, linetype = "solid", color = "red")+
+  theme(plot.caption = element_text(size = 8, color = "red"))
+
+
+```
+
+The data for the graph above have been pre-processed into two categories: United-States and Non-US.
+Originally, there are around 41 native countries to which the respondents belong. Those whose native
+country is United-States generally earn more than the average, and effectively the rest.
+
+## Specification of models
+
+A total of six models have been developed with the aim of increasing the overall accuracy and F1 score, so that the predicted values fit the actual data as best as possible. Two models have been created using each of the following techniques: logistic regression, decision trees, and random forest.
+
+This section will merely outline the model used. The results will be shown and discussed in the following section.
+
+### Logistic Regression Baseline Model
+
+The first model, the baseline logistic regression model, consists of variables that intuitively have an economic reasoning for determining the income level. These are occupation, education, workclass, capital.gain, capital.loss, and hours.per.week. As mentioned earlier, adding education.num leads to multicollinearity, as education is already added to the equation. The estimate of education is more statistically significant than education.num, therefore the latter is not added.
+
+As the dependent variable is categorical (a factor), logistic regression is a technique that is suitable as it measures the probability of of an event occurring - in this case, the probability whether a respondent receives more or less than 50K USD annually.
+
+The mathematical formulation of the model is shown below.
+
+\tiny
+
+$$
+\log \left( \frac{P(Y = 1)}{1 - P(Y = 1)} \right) = \beta_0 + \beta_1 \cdot \text{Workclass} + \beta_2 \cdot \text{Education} + \beta_3 \cdot \text{Occupation} + \beta_4 \cdot \text{Capital Gain} + \beta_5 \cdot \text{Capital Loss} + \beta_6 \cdot \text{Hours per Week}
+$$
+
+\normalsize
+
+### Logistic Regression Full Model
+
+As the title shows, the same technique is used also here, but different from the previous model, in this model all variables are added as independent variables. Adding the education.num variable does not make a difference, as the package recognizes multicollinearity and drops it from the equation.
+
+Another reason for creating another model using logistic regression, besides seeking to optimize overall accuracy and F1 score, is to run a statistics test (likelihood ratio test) that is used to compare the goodness-of-fit of two models, and is often used in logistic regression models.
+
+### Decision Tree Default Settings Model
+
+Decision trees are recommended for handling both categorical and numerical variables, allowing them to capture non-linear relationship. This model includes all the independent variables and it uses the default settings provided by the “caret” package.
+
+It can be easily understood and interpreted by the reader as it can be plotted as a tree-like model of decision and the possible consequences of each decision.
+
+### Controlled Decision Tree Model
+
+This model is developed using a decision tree algorithm, which is further optimized by tuning the complexity parameter (cp) through cross-validation. A 10-fold cross-validation is used in this model. This means that the dataset is divided into 10 parts, and the model is trained and tested 10 times. The cp, or complexity parameter, controls the size of the decision tree and ensures there is no overfitting of the model. Based on the most optimal cross-validation results, as the model is trained numerous times with different cp values, the most optimal model is then selected. This model uses for the cp all the values from 0.01 to 0.1, in an increment of 0.01.
+
+### Random Forest Default Settings Model
+
+A random forest is an ensemble machine learning algorithm that combines the outputs of multiple decision trees to make more accurate predictions. Essentially, it aggregates the predictions from numerous decision trees to reduce the risk of overfitting, which is common when using a single decision tree. This approach generally results in more reliable and robust estimates.
+
+In this model, all independent variables are utilized to explain variations in the income variable, employing the default settings of the “caret” package. The use of default settings simplifies the model-building process, allowing for an efficient evaluation of the predictive power of the independent variables on income, while leveraging the strength of the random forest algorithm in handling complex data structures and relationships.
+
+### Random Forest Tuned Model
+
+Similar to the controlled decision tree model, this model as well uses a 10-fold cross-validation to find the optimal
+value of the “mtry”. The “mtry”is a parameter used in machine learning that specifies the number of features (or
+variables) randomly sampled at each decision point of the random forest. This model uses four different values for
+the mtry, namely: 1, 3, 5, and 7.
+16
+
+\newpage
+
+# Results
+
+Attempts to obtain predicted values that fit better the actual data were successful for the most part. The table below shows that the the most performing model is the random forest with default settings from the "caret" package, while the decision tree models did not yield the desired results. All models were compared by their “Overall Accuracy” and “F1 score”.
+
+```{r resultssummary, echo=FALSE, message=FALSE}
+
+# Adding five figures behind the decimal point
+Results_Summary <- Results_Summary %>% mutate(Overall_Accuracy = sprintf("%.5f", Overall_Accuracy), 
+                                              F1_Score = sprintf("%.5f", F1_Score))
+
+# Show the results
+kable(Results_Summary, caption = "Summary of Results")
+
+```
+
+The improvement from the first to the second model (reduced or baseline logistic regression model to the full regression model) is intuitive as in the latter all the independent variables are added, compared to the former which includes only variable that consist of an economic reasoning for explaining the variations in income. Annex 1 and Annex 2 show a summary of the models, namely the estimates, standard errors, z-value, and the p-value. Statistical significance is also showed with asterisks (more indicate higher statistical significance). The estimates show the log odds of earning more than 50K USD annually for each independent variable, while holding the other variables constant. A positive estimate indicates a higher likelihood of earning more than 50K USD annually, and vice versa. It should be highlighted that adding all the variables as predictors in the second logistic regression model does not only increase the “Overall Accuracy” and “F1 Score”, it also shifts the statistical significance of some variables, e.g., “education7th-8th” in the second model is statistically significant, while in the first it is not; the same case is with “workclassSelf-emp-inc‘”.
+
+A likelihood ratio test was performed for the reduced and the full logistic regression models. It showed that the latter model provides a significantly better fit for the data, as the p-value is 2.2e-16. This shows that the additional variables added in the full model improve the explaining of the variance in the data.
+
+Expecting improvement in results when moving to decision tree models from logistic regression models might be intuitive as we shift from linear models (logistic regression) to non-linear models (decision trees) which capture the variations better. However, that is not the case with this data. An explanation to this might be that the relationship between the independent variables and the dependent variable is generally linear, therefore the decision tree models do not yield better result. This is a potential venue for other students/researchers to explore. 
+
+Below is shown the decision tree plotted from the first decision tree model. The first figure shows the predicted class (or the categorical dependent variable). The second figure shows the probability of the observations in this node that belong to the predicted class. The third figure shows the percentage of observations that fall in that node.
+
+```{r dtplot, echo=FALSE, message=FALSE}
+
+# plotting the decision tree
+
+rpart.plot(dtdef_model$finalModel)
+
+```
+
+Lastly, random forest, an ensemble method, which handles better class imbalances (as in this case there are far more observations falling under the category of “<=50K”, than “>50K”) provides the most optimal results. The tuned random forest model does not yield the desired results, mainly due to limitations of computational power of the machine used for this project. This is different from the controlled decision tree model which provides better results than the decision tree model with default settings.
+
+As the fifth model, the random forest model with default settings, yields the most optimal results, below are plotted the actual values vs. the predicted values.
+
+A heatmap is used to plot the values. Note that due to imbalances among classes, “<=50K” vs. “>50K”, the bottom left tile is a dark red due to higher frequency of observations (around 75 percent of respondents earn less than 50K USD annually). The model wrongly predicts more cases of those earning more than 50K, when they actually earn the opposite, than the other way around.
+
+```{r predvsactualvalues, echo=FALSE, message=FALSE}
+
+# as the RF default settings model has the highest OA and F1 score
+# its predicted values will be plotted alongside the actual values of the test set using a tileplot
+
+conf_matrix_visuals <- confusionMatrix(predictions_rfmodel_def, test_set$income)
+
+# Extracting the table from the confusion matrix
+conf_matrix_table <- as.table(conf_matrix_visuals$table)
+
+# Converting to data frame to visualize with ggplot
+conf_matrix_plot <- as.data.frame(conf_matrix_table)
+
+# Renaming columns
+names(conf_matrix_plot) <- c("Reference", "Prediction", "Frequency")
+
+ggplot(data = conf_matrix_plot, aes(x = Reference, y = Prediction, fill = Frequency)) +
+  geom_tile() + # plotting with a tile for each combination of actual and predicted values
+  geom_text(aes(label = sprintf("%0.0f", Frequency)), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "red") + # adding color gradient for visualizing frequency
+  theme_minimal() + # Minimal theme
+  labs(title = "Confusion Matrix: Actual vs. Predicted",
+       x = "Actual Value",
+       y = "Predicted Value",
+       fill = "Frequency")
+```
+
+
+\newpage
+
+# Conclusion and recommendations
+
+The purpose of this project was to develop a model that achieves the highest accuracy prediction accuracy by utilizing different models and different techniques and algorithms.
+
+Adding explanatory variables has shown that biases were present in the 1994 era when determining the income of an individual. Some of the variables that might be a source of bias that are statistically significant are sex, native country, and age.
+
+Several iterations of data pre-processing have been conducted to try to achieve better results in terms of “Overall Accuracy” and “F1 score”. Several categories of variables such as native.country or education have been grouped to try and achieve higher statistical significance of any, but none provided better results than leaving them as they are. After all, they do provide more complexity, and this might be the reason why it has hard to achieve better results.
+
+Using different techniques/algorithms has proved useful. Logistic regression, decision trees, and random forest are all used with categorical data. Following the theoretical explanation that ensemble methods (random forest in this case) handle better class imbalances (as there are more observations of “<=50K”, than “>50K”) helped achieve the most optimal results for this project. However, computational power of the machine used for this project was insufficient to achieve better results with a tuned random forest model, despite trying different values for cross-validation and mtry, and ways of choosing the mtry.
+
+A recommendation for other students and researchers is to explore and determine the shifts in statistical significance when comparing the reduced and the full logistic regression models. It could be due to better model specification (more explanatory variables explain better the variations in the dependent variable), or reduced multicollinearity among others. Another recommendation is to adjust the results for the final weight variable in order to infer about the whole population, and not merely the data set as this project did.
+
+\newpage
+
+# Annex 1 - Summary of the Baseline Logistic Regression Model
+
+```{r summarystatsreducedmodel, echo=FALSE, message=FALSE}
+
+summary(baselinemodel)
+
+```
+
+\newpage
+
+# Annex 2 - Summary of the Full Logistic Regression Model
+
+```{r summarystatsfullmodel, echo=FALSE, message=FALSE}
+
+summary(full_log_model)
+
+```
