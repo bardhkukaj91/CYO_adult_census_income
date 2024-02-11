@@ -263,6 +263,8 @@ It should be noted that three files in total are submitted as part of this proje
 
 \newpage
 
+# Analysis and methodology
+
 ## Exploring and cleaning data
 
 After downloading and installing the necessary packages for this project, the data is retrieved from the GitHub repository link provided in the R script and the RMD file. The data is then cleaned by removing instances of “NAs” and “?” that are present in the dataset. Initially, there are 32,561 observations; after cleaning, 30,162 remain.
